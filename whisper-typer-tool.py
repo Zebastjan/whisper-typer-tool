@@ -4,135 +4,131 @@ import whisper
 import time
 import subprocess
 import threading
-import pyaudio
 import wave
 import os
 from playsound import playsound
 from datetime import datetime
+import configparser
+import queue
+import sys
+import subprocess
+import signal
+
+# Import the configuration file
+config_file = os.path.expanduser("~/.config/whisper-typer-tool/config.txt")
+config = configparser.ConfigParser()
+config.read(config_file)
+
+# Get the default model
+default_model = config["MODEL"]["default_model"]
+
+# Get the default audio device
+default_audio_device = int(config["SOUNDCARD"]["default_audio_device"])
+
+# Get the default timeout
+default_time_to_record = int(config["TIMEOUT"]["timeout"])
+
+# Get the data directory
+data_dir = config["DATA"]["data_dir"]
+
+# Create the data directory if it doesn't exist
+if not os.path.exists(data_dir):
+    os.makedirs(data_dir)
+
+#ready counter
+file_ready_counter=1
+
+#recording variables
+is_recording = False
+is_sound_test = False
+record_process = None
+filename = None
 
 #load model
-#model selection -> (tiny base small medium large)
 print("loading model...")
-model_name = "tiny"
-model = whisper.load_model(model_name)
-playsound("model_loaded.wav")
-print(f"{model_name} model loaded")
+model = whisper.load_model(default_model)
+#playsound("model_loaded.wav")
+print(f"{default_model} model loaded")
 
-file_ready_counter=0
-stop_recording=False
-is_recording=False
-pykeyboard= keyboard.Controller()
+#function to transcribe speech
+def record_audio(filename):
+    global record_process
+    global is_recording
+    is_recording = True
+    record_process = subprocess.Popen(['arecord', '-D', 'plughw:'+str(default_audio_device)+',0',
+                    '-f', 'S16_LE', '-r', '44100', '-d', str(default_time_to_record), filename])
 
-def transcribe_speech():
-    global file_ready_counter
-    i=1
-    print("ready - start transcribing with F2 ...\n")
+def stop_recording():
+    global record_process
+    global is_recording
+    is_recording = False
+    os.kill(record_process.pid, signal.SIGINT)
+
+def transcribe_speech(queue):
+    print("Ready - start transcribing with F2 ...\n")
     while True:
-        while file_ready_counter<i:
-            time.sleep(0.01)
-
-        result = model.transcribe("test"+str(i)+".wav")
+        filename = queue.get()
+        result = model.transcribe(os.path.join(data_dir, filename))
         print(result["text"]+"\n")
         now = str(datetime.now()).split(".")[0]
-        with codecs.open('transcribe.log', 'a', encoding='utf-8') as f:
-            f.write(now+" : "+result["text"]+"\n")       
+        with codecs.open(os.path.join(data_dir, 'transcribe.log'), 'a', encoding='utf-8') as f:
+            f.write(now+" : "+result["text"]+"\n")
         for element in result["text"]:
             try:
-                pykeyboard.type(element)
+                keyboard.type(element)
                 time.sleep(0.0025)
             except:
-                print("empty or unknown symbol")        
-        os.remove("test"+str(i)+".wav")
-        i=i+1
+                pass
+        os.remove(os.path.join(data_dir, filename))
 
-#keyboard events
-pressed = set()
-
-COMBINATIONS = [
-    {
-        "keys": [
-            #{keyboard.Key.ctrl ,keyboard.Key.shift, keyboard.KeyCode(char="r")},
-            #{keyboard.Key.ctrl ,keyboard.Key.shift, keyboard.KeyCode(char="R")},
-            {keyboard.Key.f2},
-        ],
-        "command": "start record",
-    },
-]
-
-#------------
-
-#record audio
-def record_speech():
-    global file_ready_counter
-    global stop_recording
+def toggle_recording():
     global is_recording
+    global file_ready_counter
+    global filename
+    now = datetime.now()
 
-    is_recording=True
-    chunk = 1024  # Record in chunks of 1024 samples
-    sample_format = pyaudio.paInt16  # 16 bits per sample
-    channels = 2
-    fs = 44100  # Record at 44100 samples per second
-    p = pyaudio.PyAudio()  # Create an interface to PortAudio
-    stream = p.open(format=sample_format,
-                channels=channels,
-                rate=fs,
-                frames_per_buffer=chunk,
-                input=True)
+    if is_recording:
+        # stop recording
+        stop_recording()
+        queue.put(filename)
+        print("Stop recording key pressed...\n")
+    else:
+        # start recording
+        file_ready_counter += 1
+        filename = now.strftime("%Y-%m-%d-%H-%M-%S") + " counter: " + str(file_ready_counter) + ".wav"
+        record_audio(os.path.join(data_dir, filename))
+        print("Start recording key pressed...\n")
 
-    frames = []  # Initialize array to store frames
-
-    print("Start recording...\n")
-    playsound("on.wav")
-
-    while stop_recording==False:
-        data = stream.read(chunk)
-        frames.append(data)
-
-    # Stop and close the stream
-    stream.stop_stream()
-    stream.close()
-    # Terminate the PortAudio interface
-    p.terminate()
-    playsound("off.wav")
-    print('Finish recording')
-
-    # Save the recorded data as a WAV file
-    wf = wave.open("test"+str(file_ready_counter+1)+".wav", 'wb')
-    wf.setnchannels(channels)
-    wf.setsampwidth(p.get_sample_size(sample_format))
-    wf.setframerate(fs)
-    wf.writeframes(b''.join(frames))
-    wf.close()
-
-    stop_recording=False
-    is_recording=False
-    file_ready_counter=file_ready_counter+1
-
-#------------
-
-#transcribe speech in infinte loop
-t2 = threading.Thread(target=transcribe_speech)
+# transcribe speech in infinite loop
+queue = queue.Queue()
+t2 = threading.Thread(target=transcribe_speech, args=(queue,))
 t2.start()
 
 #hot key events
-def on_press(key):
-    pressed.add(key)
-
 def on_release(key):
-    global pressed
-    global stop_recording
     global is_recording
-    for c in COMBINATIONS:
-        for keys in c["keys"]:
-            if keys.issubset(pressed):
-                if c["command"]=="start record" and stop_recording==False and is_recording==False:
-                    t1 = threading.Thread(target=record_speech)
-                    t1.start()
-                else:
-                    if c["command"]=="start record" and is_recording==True:
-                        stop_recording=True
-                pressed = set()
+    global is_sound_test
 
-with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+    if key == keyboard.Key.f2 and not is_sound_test:
+        toggle_recording()
+    elif key == keyboard.Key.f4:
+        if is_recording and is_sound_test:
+            stop_recording()
+            is_sound_test = False
+            filename = "test" + str(file_ready_counter) + ".wav"
+            subprocess.Popen(["aplay", os.path.join(data_dir, filename)])
+        elif is_recording and not is_sound_test:
+            pass
+        else:
+            is_sound_test = True
+            filename = "test" + str(file_ready_counter) + ".wav"
+            record_audio(os.path.join(data_dir, filename))
+            print("Speak into the microphone.\n Press the test key again, to hear your audio test.\n")
+    elif key == keyboard.Key.esc:
+        if is_recording:
+            toggle_recording()
+        print("Exiting...\n")
+        os._exit(0)
+
+with keyboard.Listener(on_release=on_release) as listener:
     listener.join()
-
